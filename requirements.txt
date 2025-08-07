@@ -1,0 +1,22 @@
+# This line ensures a small, CPU-only version of PyTorch is installed.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# Core web server
+fastapi
+uvicorn
+
+# LangChain and document processing
+langchain
+langchain-community
+langchain-text-splitters
+pypdf
+
+# Vector search and embeddings
+torch
+sentence-transformers
+faiss-cpu
+
+# HTTP requests and secrets
+httpx
+python-dotenv
+openai
