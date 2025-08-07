@@ -93,7 +93,7 @@ async def run_rag(payload: QuestionPayload):
     for q in payload.questions:
         q_vec = encoder.encode([q]).astype("float32")
         # Search the index we just created for this specific document
-        _, I = index.search(q_vec, k=3) # Reduced k to 3 for max efficiency
+        _, I = index.search(q_vec, k=20) # Reduced k to 3 for max efficiency
         context = "\n\n".join(chunks[i] for i in I[0])
 
         prompt = f"""
