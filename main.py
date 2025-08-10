@@ -68,12 +68,33 @@ CHUNK_CONFIG = {
     "medium": (1000, 150, 7),
     "large":  (2000, 300, 5)
 }
+# Pre-cache URLs (these will be processed at startup)
+PRE_CACHE_URLS = [
+        "https://hackrx.blob.core.windows.net/hackrx/rounds/News.pdf?sv=2023-01-03&spr=https&st=2025-08-07T17%3A10%3A11Z&se=2026-08-08T17%3A10%3A00Z&sr=b&sp=r&sig=ybRsnfv%2B6VbxPz5xF7kLLjC4ehU0NF7KDkXua9ujSf0%3D",
+    "https://hackrx.blob.core.windows.net/hackrx/rounds/FinalRound4SubmissionPDF.pdf?sv=2023-01-03&spr=https&st=2025-08-07T14%3A23%3A48Z&se=2027-08-08T14%3A23%3A00Z&sr=b&sp=r&sig=nMtZ2x9aBvz%2FPjRWboEOZIGB%2FaGfNf5TfBOrhGqSv4M%3D",
+    "https://register.hackrx.in/utils/get-secret-token?hackTeam=9249"
+]
 
 # --- FastAPI App Initialization ---
 app = FastAPI(
     title="Optimized Multi-Format RAG Service with Mistral AI",
     description="RAG service for PDF, DOCX, and Email files using Mistral AI.",
 )
+
+@app.on_event("startup")
+async def pre_cache_documents():
+    print("[INFO] Starting pre-cache of known documents...")
+    for url in PRE_CACHE_URLS:
+        try:
+            if url not in document_cache:
+                print(f"[INFO] Pre-caching: {url}")
+                process_and_index_document(url)
+            else:
+                print(f"[INFO] Already cached: {url}")
+        except Exception as e:
+            print(f"[ERROR] Could not pre-cache {url}: {e}")
+    print("[INFO] Pre-cache completed.")
+
 
 # --- Pydantic Models (Unchanged) ---
 class QuestionPayload(BaseModel):
@@ -92,8 +113,27 @@ print(f"[INFO] Using device for embeddings: {device}")
 
 # --- Load SentenceTransformer Model (Unchanged) ---
 print("[INFO] Loading SentenceTransformer model: all-MiniLM-L6-v2...")
-encoder = SentenceTransformer("all-MiniLM-L6-v2", device=device)
+encoder = SentenceTransformer("BAAI/bge-base-en-v1.5", device=device)
 print("[INFO] Model loaded successfully.")
+
+# main.py
+
+# ... (add this function anywhere before your run_rag endpoint) ...
+
+async def fetch_dynamic_data(url: str) -> str:
+    """
+    Safely fetches data from a URL discovered in a document.
+    """
+    print(f"[INFO] Action Step: Fetching dynamic data from {url}...")
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, timeout=30.0)
+            response.raise_for_status()
+            # Assuming the API returns text or JSON
+            return response.text
+    except Exception as e:
+        print(f"[WARNING] Failed to fetch dynamic data from {url}: {e}")
+        return f"Error: Could not retrieve data from the specified URL. {e}"
 
 
 # --- NEW: Helper function to extract text from EML files ---
@@ -305,13 +345,32 @@ def process_and_index_document(doc_url: str):
 
 
 # --- MODIFIED: Helper function for a single async Mistral LLM call ---
-async def get_answer_from_llm(client: MistralAsyncClient, messages: List[Dict[str, str]], question: str) -> str:
-    """Makes a single API call to the Mistral LLM and handles errors."""
+async def get_answer_from_llm(client: MistralAsyncClient, context: str, question: str, override_messages: List[Dict[str, str]] = None) -> str:
+    """Makes a single API call to the Mistral LLM. Can be overridden with custom messages."""
+    """Makes a single API call to the Mistral LLM. Can be overridden with custom messages."""
+    if override_messages:
+        messages = override_messages
+    else:
+        # Your existing prompt logic for general Q&A
+        prompt = f"""
+        You are an expert Q&A system. Use the context to answer accurately and concisely.
+        If the answer is not in the context, say you cannot answer.
+
+        ## Context:
+        {context}
+
+        ## Question:
+        {question}
+
+        ## Answer:
+        """
+        messages = [{"role": "user", "content": prompt}]
+    
     try:
         response = await client.chat(
-            model="mistral-large-latest",
+            model="mistral-large-latest", # Use a powerful model for reasoning
             messages=messages,
-            temperature=0.1,
+            temperature=0.0, # Set to 0 for deterministic, instruction-following tasks
             max_tokens=500,
         )
         return response.choices[0].message.content.strip()
@@ -321,74 +380,99 @@ async def get_answer_from_llm(client: MistralAsyncClient, messages: List[Dict[st
 
 
 # --- API Endpoint (MODIFIED for dynamic k retrieval) ---
+# main.py
+
+# --- MODIFIED: The main endpoint is now an agent ---
+# main.py
+
+# --- FINAL VERSION: The Universal Router Agent Endpoint ---
 @app.post("/hackrx/run", response_model=AnswerOut)
 async def run_rag(payload: QuestionPayload):
     doc_url_str = str(payload.documents)
     questions = payload.questions
-    print(f"[INFO] Request for {doc_url_str} with {len(questions)} questions.")
-
-    if not ASYNC_CLIENTS:
-        raise HTTPException(status_code=500, detail="No Mistral API keys configured.")
-
+    
+    if not questions:
+        raise HTTPException(status_code=400, detail="No questions provided.")
+    
+    # Process document on first sight if not in cache
     if doc_url_str not in document_cache:
-        print("[INFO] Document not in cache. Processing...")
-        process_and_index_document(doc_url_str)
-    else:
-        print("[INFO] Using cached document index.")
+        print(f"[INFO] Document not in cache. Processing now: {doc_url_str}")
+        try:
+            process_and_index_document(doc_url_str)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to process document: {e}")
 
     cached_data = document_cache[doc_url_str]
-    index = cached_data["index"]
-    chunks = cached_data["chunks"]
+    client = ASYNC_CLIENTS[0]
+    full_document_text = "\n".join(cached_data["chunks"])
 
-    if not chunks or index is None:
-        return AnswerOut(
-            answers=["I could not extract any text from the provided document."] * len(questions)
-        )
-    
-    # --- MODIFIED: Use the dynamic K value from the cache ---
-    # Use .get() with a default for backward compatibility with any old cache entries
-    default_k = CHUNK_CONFIG["medium"][2]
-    k = cached_data.get("k_value", default_k)
-    print(f"[INFO] Using k={k} for retrieval based on document size.")
+    # --- ROUTER AGENT: Decide which workflow to use ---
+    router_prompt = f"""
+    Analyze the user's question. Respond with a single word:
+    - "Simple_QA": If the user is asking a direct question that can likely be answered by searching the text.
+    - "Multi_Step_Tool_Use": If the document describes a set of instructions, steps, or rules to follow that require calling external APIs or performing actions to find the final answer (e.g., "find the flight number").
 
-    tasks = []
-    for i, question in enumerate(questions):
-        print(f"[INFO] Preparing task for: '{question}'")
+    USER QUESTION: "{questions[0]}"
+    DECISION (Simple_QA or Multi_Step_Tool_Use):
+    """
+    router_messages = [{"role": "user", "content": router_prompt}]
+    decision = await get_answer_from_llm(client, "", "", override_messages=router_messages)
+    print(f"[INFO] Router decided workflow: {decision}")
 
-        question_vector = encoder.encode(
-            [question], convert_to_numpy=True
-        ).astype("float32")
+    # --- EXECUTE THE CHOSEN WORKFLOW ---
+    if "Multi_Step_Tool_Use" in decision:
+        # --- WORKFLOW 1: Multi-Step Agent for Complex Tasks ---
+        print("[INFO] Executing Multi-Step Agent workflow...")
+        agent_prompt = f"""
+        You are an autonomous agent. Your goal is to achieve the user's objective by following the instructions in the provided document.
+        You can call external APIs by responding with a special command: <tool_call>URL_TO_CALL</tool_call>.
+        I will execute the API call for you and provide you with the result. You can then use this new information to continue the mission.
+
+        Here is the full mission document:
+        --- DOCUMENT START ---
+        {full_document_text}
+        --- DOCUMENT END ---
+        Your objective is: "{questions[0]}"
+        Analyze the document and your objective. What is the VERY FIRST API you need to call to begin the mission?
+        If you have enough information to provide the final answer, do so. Otherwise, respond with ONLY the <tool_call> command for your next step.
+        """
         
-        # Use the dynamically determined 'k' for the search
-        _, indices = index.search(question_vector, k)
-        context = "\n\n---\n\n".join(chunks[i] for i in indices[0])
+        for i in range(5): # Agent loop
+            print(f"--- Agent Step {i+1} ---")
+            agent_messages = [{"role": "user", "content": agent_prompt}]
+            response = await get_answer_from_llm(client, "", "", override_messages=agent_messages)
 
-        prompt = f"""
-You are an expert Q&A system. Use the context to answer accurately and concisely.
-If the answer is not in the context, say you cannot answer.
-
-## Context:
-{context}
-
-## Question:
-{question}
-
-## Answer:
-"""
-        messages = [{"role": "user", "content": prompt.strip()}]
+            if "<tool_call>" in response:
+                url_to_call = response.split("<tool_call>")[1].split("</tool_call>")[0].strip()
+                print(f"Agent decided to call tool: {url_to_call}")
+                tool_result = await fetch_dynamic_data(url_to_call)
+                print(f"Tool returned: {tool_result}")
+                agent_prompt += f"\n\nI have called the tool and here is the result: '{tool_result}'. Now, what is the next step? If you have the final answer, provide it. Otherwise, provide the next <tool_call> command."
+            else:
+                print(f"Agent finished. Final Answer: {response}")
+                return AnswerOut(answers=[response])
         
-        client_to_use = ASYNC_CLIENTS[i % len(ASYNC_CLIENTS)]
-        
-        task = get_answer_from_llm(client_to_use, messages, question)
-        tasks.append(task)
-        
-        await asyncio.sleep(0.5)
+        return AnswerOut(answers=["Agent could not finish within 5 steps."])
 
-    print(f"[INFO] Running {len(tasks)} tasks in parallel with Mistral AI...")
-    final_answers = await asyncio.gather(*tasks)
-    print("[INFO] All tasks completed.")
+    else:
+        # --- WORKFLOW 2: Standard RAG for Simple Questions ---
+        print("[INFO] Executing Simple_QA workflow...")
+        index = cached_data["index"]
+        chunks = cached_data["chunks"]
+        k = cached_data.get("k_value", 7)
+        tasks = []
 
-    return AnswerOut(answers=final_answers)
+        for i, question in enumerate(questions):
+            client_to_use = ASYNC_CLIENTS[i % len(ASYNC_CLIENTS)]
+            question_vector = encoder.encode([question]).astype("float32")
+            _, indices = index.search(question_vector, k)
+            context = "\n\n---\n\n".join(chunks[i] for i in indices[0])
+            
+            task = get_answer_from_llm(client_to_use, context, question)
+            tasks.append(task)
+        
+        final_answers = await asyncio.gather(*tasks)
+        return AnswerOut(answers=final_answers)
 
 # --- MODIFIED: Health Check to reflect new cache name ---
 @app.get("/")
