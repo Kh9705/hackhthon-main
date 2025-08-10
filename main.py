@@ -68,33 +68,12 @@ CHUNK_CONFIG = {
     "medium": (1000, 150, 7),
     "large":  (2000, 300, 5)
 }
-# Pre-cache URLs (these will be processed at startup)
-PRE_CACHE_URLS = [
-        "https://hackrx.blob.core.windows.net/hackrx/rounds/News.pdf?sv=2023-01-03&spr=https&st=2025-08-07T17%3A10%3A11Z&se=2026-08-08T17%3A10%3A00Z&sr=b&sp=r&sig=ybRsnfv%2B6VbxPz5xF7kLLjC4ehU0NF7KDkXua9ujSf0%3D",
-    "https://hackrx.blob.core.windows.net/hackrx/rounds/FinalRound4SubmissionPDF.pdf?sv=2023-01-03&spr=https&st=2025-08-07T14%3A23%3A48Z&se=2027-08-08T14%3A23%3A00Z&sr=b&sp=r&sig=nMtZ2x9aBvz%2FPjRWboEOZIGB%2FaGfNf5TfBOrhGqSv4M%3D",
-    "https://register.hackrx.in/utils/get-secret-token?hackTeam=9249"
-]
 
 # --- FastAPI App Initialization ---
 app = FastAPI(
     title="Optimized Multi-Format RAG Service with Mistral AI",
     description="RAG service for PDF, DOCX, and Email files using Mistral AI.",
 )
-
-@app.on_event("startup")
-async def pre_cache_documents():
-    print("[INFO] Starting pre-cache of known documents...")
-    for url in PRE_CACHE_URLS:
-        try:
-            if url not in document_cache:
-                print(f"[INFO] Pre-caching: {url}")
-                process_and_index_document(url)
-            else:
-                print(f"[INFO] Already cached: {url}")
-        except Exception as e:
-            print(f"[ERROR] Could not pre-cache {url}: {e}")
-    print("[INFO] Pre-cache completed.")
-
 
 # --- Pydantic Models (Unchanged) ---
 class QuestionPayload(BaseModel):
@@ -112,7 +91,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"[INFO] Using device for embeddings: {device}")
 
 # --- Load SentenceTransformer Model (Unchanged) ---
-print("[INFO] Loading SentenceTransformer model: all-MiniLM-L6-v2...")
+print("[INFO] Loading SentenceTransformer model: BAAI/bge-base-en-v1.5...")
 encoder = SentenceTransformer("BAAI/bge-base-en-v1.5", device=device)
 print("[INFO] Model loaded successfully.")
 
